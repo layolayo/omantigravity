@@ -842,6 +842,214 @@ Panel {
               }
             }
           }
+        // ── API Health & Latency Card ──────────────────────────────────────
+        BorderSurface {
+          visible: root.usageData && !!root.usageData.latency
+          Layout.fillWidth: true
+          color: {
+            var lat = root.usageData ? root.usageData.latency : null
+            if (lat && lat.health === "degraded") return Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.08)
+            if (lat && lat.health === "slow") return Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.08)
+            return root.subtle
+          }
+          borderSpec: Border.flat(
+            root.usageData && root.usageData.latency && root.usageData.latency.health === "degraded" ? root.urgent : root.borderCol, 
+            1
+          )
+          radius: Style.cornerRadius
+          padding: Style.space(8)
+          implicitHeight: latencyBody.implicitHeight + contentTopInset + contentBottomInset
+
+          ColumnLayout {
+            id: latencyBody
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(8)
+            spacing: Style.space(6)
+
+            // Header Row
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(6)
+
+              Text {
+                text: {
+                  var lat = root.usageData ? root.usageData.latency : null
+                  if (!lat) return "󰓅"
+                  if (lat.health === "degraded") return "󰀨"
+                  if (lat.health === "slow") return "󰀦"
+                  return "󰓅"
+                }
+                color: {
+                  var lat = root.usageData ? root.usageData.latency : null
+                  if (!lat) return root.fg
+                  if (lat.health === "degraded") return root.urgent
+                  if (lat.health === "slow") return root.warning
+                  return root.fg
+                }
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+
+              Text {
+                text: "API Health & Latency"
+                color: root.fg
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Item { Layout.fillWidth: true }
+
+              // Status Tag
+              Rectangle {
+                readonly property var lat: root.usageData ? root.usageData.latency : null
+                readonly property string hState: lat ? (lat.health || "healthy") : "healthy"
+                height: Style.space(18)
+                implicitWidth: statusText.implicitWidth + Style.space(8)
+                radius: Style.cornerRadius
+                color: hState === "degraded" ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.2) : (hState === "slow" ? Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.2) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1))
+                border.width: 1
+                border.color: hState === "degraded" ? root.urgent : (hState === "slow" ? root.warning : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.2))
+
+                Text {
+                  id: statusText
+                  anchors.centerIn: parent
+                  text: parent.hState === "degraded" ? "DEGRADED" : (parent.hState === "slow" ? "SLOW" : "HEALTHY")
+                  color: parent.hState === "degraded" ? root.urgent : (parent.hState === "slow" ? root.warning : root.fg)
+                  font.family: root.fontFamily
+                  font.pixelSize: 9
+                  font.bold: true
+                }
+              }
+            }
+
+            // Metrics row: Ping, TTFB, Avg Turn
+            RowLayout {
+              Layout.fillWidth: true
+              spacing: Style.space(12)
+
+              // Ping
+              RowLayout {
+                spacing: Style.space(4)
+                Text {
+                  text: "Ping:"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: {
+                    var net = root.usageData && root.usageData.latency ? root.usageData.latency.network : null
+                    return (net && net.ping_ms !== null && net.ping_ms !== undefined) ? (net.ping_ms + "ms") : "--"
+                  }
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+
+              // TTFB
+              RowLayout {
+                spacing: Style.space(4)
+                Text {
+                  text: "TTFB:"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: {
+                    var net = root.usageData && root.usageData.latency ? root.usageData.latency.network : null
+                    return (net && net.ttfb_ms !== null && net.ttfb_ms !== undefined) ? (net.ttfb_ms + "ms") : "--"
+                  }
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+
+              // Turn Latency
+              RowLayout {
+                spacing: Style.space(4)
+                Text {
+                  text: "Avg Turn:"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Text {
+                  text: {
+                    var lat = root.usageData ? root.usageData.latency : null
+                    return (lat && lat.average_turn_sec !== null && lat.average_turn_sec !== undefined) ? (lat.average_turn_sec + "s") : "--"
+                  }
+                  color: {
+                    var lat = root.usageData ? root.usageData.latency : null
+                    if (lat && lat.average_turn_sec > 15) return root.urgent
+                    if (lat && lat.average_turn_sec > 8) return root.warning
+                    return root.fg
+                  }
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+              }
+
+              Item { Layout.fillWidth: true }
+            }
+
+            // 503 Capacity Warning if detected
+            Repeater {
+              model: {
+                var lat = root.usageData ? root.usageData.latency : null
+                if (!lat || !lat.recent_errors) return []
+                var caps = []
+                for (var i = 0; i < lat.recent_errors.length; i++) {
+                  if (lat.recent_errors[i].is_capacity_error) {
+                    caps.push(lat.recent_errors[i])
+                  }
+                }
+                return caps.slice(-1)
+              }
+
+              delegate: Rectangle {
+                required property var modelData
+                Layout.fillWidth: true
+                height: Style.space(22)
+                radius: Style.cornerRadius
+                color: Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.15)
+                border.width: 1
+                border.color: root.urgent
+
+                RowLayout {
+                  anchors.fill: parent
+                  anchors.leftMargin: Style.space(6)
+                  anchors.rightMargin: Style.space(6)
+                  spacing: Style.space(4)
+
+                  Text {
+                    text: "󰀨"
+                    color: root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Text {
+                    Layout.fillWidth: true
+                    text: "503 Server Overload (" + modelData.time + ") — Model capacity exhausted"
+                    color: root.urgent
+                    font.family: root.fontFamily
+                    font.pixelSize: 10
+                    font.bold: true
+                    elide: Text.ElideRight
+                  }
+                }
+              }
+            }
+          }
         }
 
         // ── Footer / Shortcuts ─────────────────────────────────────────────

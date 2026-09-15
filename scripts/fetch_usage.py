@@ -21,6 +21,12 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from check_latency import get_latency_report
+except Exception:
+    get_latency_report = None
+
 # Hard cap on combined stdout/stderr read from the `agy` CLI, to bound memory
 # use if the process is hostile or wedged and keeps producing output.
 MAX_OUTPUT_BYTES = 2 * 1024 * 1024  # 2 MiB
@@ -381,7 +387,8 @@ def format_exact_time(iso_str: str) -> str:
 
 def parse_usage_data(
     usage_raw: Dict[str, Any],
-    model_raw: Optional[Dict[str, Any]] = None
+    model_raw: Optional[Dict[str, Any]] = None,
+    latency_raw: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     cmd_data = usage_raw.get("command", {}).get("data", {})
     raw_groups = cmd_data.get("groups", [])
@@ -470,6 +477,13 @@ def parse_usage_data(
             }
 
     tooltip = "Antigravity Quota\n" + ("\n".join(summary_lines) if summary_lines else "No limits reported")
+    if latency_raw and isinstance(latency_raw, dict):
+        h = latency_raw.get("health")
+        avg = latency_raw.get("average_turn_sec")
+        if h == "degraded":
+            tooltip += f"\nAPI Status: 🛑 Degraded ({avg}s)" if avg else "\nAPI Status: 🛑 Degraded"
+        elif h == "slow":
+            tooltip += f"\nAPI Status: 🟡 Slow ({avg}s)" if avg else "\nAPI Status: 🟡 Slow"
 
     return {
         "status": "ok",
@@ -486,6 +500,7 @@ def parse_usage_data(
         "active_model": active_model,
         "groups": parsed_groups,
         "tooltip": tooltip,
+        "latency": latency_raw,
     }
 
 
@@ -550,11 +565,13 @@ def main():
         try:
             # Run /usage and /model in parallel
             try:
-                with ThreadPoolExecutor(max_workers=2) as executor:
+                with ThreadPoolExecutor(max_workers=3) as executor:
                     fut_usage = executor.submit(run_agy_command, agy_fd, "/usage")
                     fut_model = executor.submit(run_agy_command, agy_fd, "/model")
+                    fut_latency = executor.submit(get_latency_report) if get_latency_report else None
                     usage_res = fut_usage.result()
                     model_res = fut_model.result()
+                    latency_res = fut_latency.result() if fut_latency else None
 
                 if not usage_res or usage_res.get("status") != "SUCCESS":
                     # Attempt to use stale cache
@@ -574,7 +591,7 @@ def main():
                     print(json.dumps(err_resp, indent=2))
                     return
 
-                result = parse_usage_data(usage_res, model_res)
+                result = parse_usage_data(usage_res, model_res, latency_res)
 
                 # Save to cache
                 _write_cache(result)
