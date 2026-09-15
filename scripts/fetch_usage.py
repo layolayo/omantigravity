@@ -477,13 +477,6 @@ def parse_usage_data(
             }
 
     tooltip = "Antigravity Quota\n" + ("\n".join(summary_lines) if summary_lines else "No limits reported")
-    if latency_raw and isinstance(latency_raw, dict):
-        h = latency_raw.get("health")
-        avg = latency_raw.get("average_turn_sec")
-        if h == "degraded":
-            tooltip += f"\nAPI Status: 🛑 Degraded ({avg}s)" if avg else "\nAPI Status: 🛑 Degraded"
-        elif h == "slow":
-            tooltip += f"\nAPI Status: 🟡 Slow ({avg}s)" if avg else "\nAPI Status: 🟡 Slow"
 
     return {
         "status": "ok",

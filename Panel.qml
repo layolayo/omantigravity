@@ -347,18 +347,37 @@ Panel {
     activeColor: (root.hasAlerts || root.hasCapacityError) ? root.urgent : (root.isApiDegraded ? root.warning : root.fg)
     tooltipText: {
       var base = root.usageData && root.usageData.tooltip ? root.usageData.tooltip : "Antigravity CLI Quota"
+      var lat = root.usageData ? root.usageData.latency : null
+      var latSec = (lat && lat.average_turn_sec) ? (lat.average_turn_sec + "s") : ""
+      var pingStr = (lat && lat.network && lat.network.ping_ms !== null && lat.network.ping_ms !== undefined) ? (lat.network.ping_ms + "ms") : ""
+
+      var lines = []
       if (root.hasAlerts) {
-        return "⚠️ LOW QUOTA ALERT! (≤" + root.alertThresholdPct + "%)\n" + base
+        lines.push("⚠️ LOW QUOTA ALERT! (≤" + root.alertThresholdPct + "%)")
       }
-      if (root.hasCapacityError) {
-        return "🛑 UPSTREAM 503 SERVER OVERLOAD!\nGoogle model capacity exhausted.\n" + base
+
+      lines.push(base)
+
+      if (lat) {
+        var statusTag = ""
+        if (root.hasCapacityError) {
+          statusTag = "🛑 503 Overload"
+        } else if (lat.health === "degraded") {
+          statusTag = "🛑 High Latency"
+        } else if (lat.health === "slow") {
+          statusTag = "🟡 Slow"
+        } else {
+          statusTag = "🟢 Healthy"
+        }
+
+        var details = []
+        if (latSec) details.push(latSec)
+        if (pingStr) details.push("ping " + pingStr)
+        var detailStr = details.length > 0 ? " (" + details.join(" · ") + ")" : ""
+        lines.push("API: " + statusTag + detailStr)
       }
-      if (root.isApiDegraded) {
-        var latSec = (root.usageData && root.usageData.latency && root.usageData.latency.average_turn_sec) 
-          ? (root.usageData.latency.average_turn_sec + "s") : ""
-        return "⚠️ HIGH API LATENCY (" + latSec + ")!\n" + base
-      }
-      return base
+
+      return lines.join("\n")
     }
     onPressed: function(b) { root.triggerPress(b) }
   }
