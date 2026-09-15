@@ -1,6 +1,6 @@
 # Omantigravity — Antigravity CLI Usage & Quota Plugin for Omarchy
 
-An Omarchy shell bar widget and popup panel plugin that monitors and displays **Google Antigravity CLI** (`agy`) limits, 5-hour rolling windows, weekly quotas, and active model status in real time.
+An Omarchy shell bar widget and popup panel plugin that monitors **Google Antigravity CLI** (`agy`) quota limits, 5-hour and weekly windows, active model status, and Cloud Service health (capacity and turn latency) in real time.
 
 > **Disclaimer:** *This project is an unofficial community plugin for Omarchy. It is not developed by, endorsed by, affiliated with, or in any way officially connected to [Google LLC](https://google.com), [Anthropic PBC](https://anthropic.com), [OpenAI](https://openai.com), or their respective subsidiaries. All product names, logos, brands, trademarks, and registered trademarks (including Google, Google Antigravity, Gemini, Anthropic, Claude, OpenAI, and GPT) are the property of their respective owners and are used solely for identification, reference, and interoperability purposes.*
 
@@ -10,17 +10,20 @@ An Omarchy shell bar widget and popup panel plugin that monitors and displays **
 
 ## Benefits & Features
 
-- **At-a-Glance Quota in Your Bar**: Real-time remaining quota displayed directly on your status bar (`λ 86%`). Automatically turns urgent red with an alert glyph (`󰀨`) when quota is low.
+- **At-a-Glance Quota in Your Bar**: Real-time remaining quota displayed directly on your status bar (`λ 86%`). Automatically turns urgent red with an alert glyph when quota is low, servers are at capacity, or turn latency is high.
 - **Interactive Metric Selector**: Minimalist rectangular chips in the panel to select which metric the bar tracks:
   - **Gemini**: Shows the most constrained limit for Gemini models (Flash, Pro).
   - **Claude & GPT**: Shows the most constrained limit for third-party models (Opus, Sonnet, GPT-OSS).
   - **Lowest**: Dynamically tracks the absolute lowest limit across all groups and windows.
 - **Pin Any Specific Limit**: Click any individual 5-hour or weekly progress bar in the panel to pin that exact limit to the status bar (indicated by a clean `󰄬 On bar` badge).
+- **Cloud Service Status**: In-panel card for three distinct metrics — **Quota** (your account limits), **Capacity** (Google 503 / servers full, from local CLI logs), and **Latency** (recent turn durations). No extra network traffic unless you opt in.
 - **Customizable Alert System**:
   - Configurable alert threshold percentage (default: **20%** remaining).
   - Prominent in-panel alert banner highlighting critical quotas and their exact reset countdown.
-  - Native desktop notifications via `notify-send` when limits drop to or below your threshold.
-  - In-panel quick selectors (`[10%]`, `[15%]`, `[20%]`, `[25%]`, `[30%]`) to set your threshold. Toggle notifications on/off entirely via the `enableNotifications` setting.
+  - Native desktop notifications via `notify-send` for low quota, server capacity, and high latency.
+  - In-panel quick selectors (`[10%]`, `[15%]`, `[20%]`, `[25%]`, `[30%]`) to set your threshold.
+  - One-click **Notify** / **Muted** toggle in the panel header (`enableNotifications`).
+- **Opt-in Network Probes** *(off by default)*: Click **PROBES: OFF** / **PROBES: ON** on the Cloud Service Status card to enable ICMP ping and HTTPS TTFB to Google's API host. When off, Ping and TTFB show `off` and the plugin does not beacon.
 - **Antigravity Branding & Active Model**:
   - Displays the clean Lambda (`λ`) glyph, current active model, and reasoning effort tier (e.g. `Gemini 3.8 Flash · Reasoning: Medium`).
 - **Compact Non-Scroll Design**: Fully fitted layout tailored to Omarchy's design language (`Style.cornerRadius`, no scrollbars).
@@ -41,6 +44,8 @@ Before using the plugin, ensure the following dependencies and tools are availab
   - `python3` (3.8+) for running the background usage fetcher and cache engine (`scripts/fetch_usage.py`). Only uses Python standard library modules; no external `pip` dependencies are needed.
 - **Desktop Notifications** *(Optional)*:
   - `libnotify` (`notify-send`) for system notification alerts when quota drops below your configured threshold.
+- **Network probes** *(Optional, off by default)*:
+  - `/usr/bin/ping` and `/usr/bin/curl` are used only if you enable **PROBES: ON** (or `enableNetworkHealth`). The widget never auto-discovers or guesses these binaries.
 - **Nerd Font**:
   - Any Nerd Font (e.g. `JetBrainsMono Nerd Font`, default in Omarchy) for iconography and status indicators.
 
@@ -172,16 +177,20 @@ export OMANTIGRAVITY_AGY_PATH=~/.local/share/mise/shims/agy
 
 ### Latency & Health Tracker (`scripts/check_latency.py`)
 
-A diagnostic utility that monitors real-time network ping, HTTPS TTFB, multi-turn AI response durations, and detects upstream HTTP 503 capacity exhaustion errors from Google's endpoint:
+Reads local Antigravity CLI logs for turn durations and 503 capacity errors. Active ICMP ping and HTTPS TTFB are **off unless you pass `--network`** (same default as the widget):
 
 ```bash
-# Run one-shot health and latency diagnostic report
+# Log-only report (no ping/curl)
 ./scripts/check_latency.py
 
-# Output structured JSON for automation or panel integration
-./scripts/check_latency.py --json
+# Include live ping & TTFB probes
+./scripts/check_latency.py --network
 
-# Continuously monitor every 10 seconds
+# Structured JSON
+./scripts/check_latency.py --json
+./scripts/check_latency.py --network --json
+
+# Continuously monitor every 10 seconds (log-only)
 ./scripts/check_latency.py --watch 10
 ```
 
