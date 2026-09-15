@@ -388,7 +388,7 @@ Panel {
       if (lat) {
         var statusTag = ""
         if (root.hasCapacityError) {
-          statusTag = "🛑 Google Servers Full"
+          statusTag = "🛑 Servers Full"
         } else if (lat.health === "degraded") {
           statusTag = "🛑 High Latency"
         } else if (lat.health === "slow") {
@@ -717,7 +717,7 @@ Panel {
 
                   Text {
                     Layout.fillWidth: true
-                    text: "Google Servers at Capacity (" + modelData.time + ") — AI model overloaded, requests retrying"
+                    text: "Google Servers Full (" + modelData.time + ") · Retrying..."
                     color: root.urgent
                     font.family: root.fontFamily
                     font.pixelSize: 10
