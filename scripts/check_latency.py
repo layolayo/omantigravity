@@ -12,22 +12,25 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import fcntl
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
-import signal
 import stat
-import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from secure_fs import open_verified_chain, run_sandboxed_binary_fd
+
 DEFAULT_LOG_DIR = Path.home() / ".gemini" / "antigravity-cli" / "log"
 DEFAULT_HOST = "daily-cloudcode-pa.googleapis.com"
 
-PING_BIN = "/usr/bin/ping"
-CURL_BIN = "/usr/bin/curl"
+PING_PATH = Path("/usr/bin/ping")
+CURL_PATH = Path("/usr/bin/curl")
 
 # 1 MiB hard ceiling on log read to protect against massive files or unkillable hangs
 MAX_LOG_READ_BYTES = 1 * 1024 * 1024
@@ -35,14 +38,7 @@ MAX_LOG_READ_BYTES = 1 * 1024 * 1024
 HOST_RE = re.compile(
     r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$"
 )
-PROHIBITED_HOST_PREFIXES = (
-    "127.", "10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
-    "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
-    "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
-    "0.0.0.0", "::1", "fc", "fd", "fe80"
-)
 PROHIBITED_HOST_SUFFIXES = (".local", ".internal", ".localhost", ".onion", ".arpa")
-
 LOG_FILENAME_RE = re.compile(r"^cli-[a-zA-Z0-9_\-]+\.log$")
 
 
@@ -50,147 +46,112 @@ def validate_host(host: str) -> bool:
     """Validate host string against DNS hostname rules, rejecting SSRF/injection vectors."""
     if not isinstance(host, str) or not host:
         return False
-    host = host.strip().lower()
+    host = host.strip()
+    if "@" in host or ":" in host or "/" in host or "\\" in host:
+        return False
+    if host.startswith("-") or host.endswith("."):
+        return False
     if not HOST_RE.match(host):
         return False
-    if host.startswith(PROHIBITED_HOST_PREFIXES):
+
+    # Reject any IP address (IPv4 or IPv6, loopback, private, or metadata)
+    try:
+        ipaddress.ip_address(host)
         return False
-    if host.endswith(PROHIBITED_HOST_SUFFIXES):
+    except ValueError:
+        pass
+
+    lower = host.lower()
+    if lower.endswith(PROHIBITED_HOST_SUFFIXES):
         return False
-    tld = host.split(".")[-1]
-    if tld.isdigit():
+
+    parts = lower.split(".")
+    if any(p.isdigit() for p in parts):
         return False
+
     return True
 
 
-def _verify_system_binary(path_str: str) -> bool:
-    """Verify that path_str is an absolute, root/user-owned, non-group/world-writable executable regular file."""
-    try:
-        st = os.stat(path_str, follow_symlinks=False)
-        return (
-            stat.S_ISREG(st.st_mode)
-            and st.st_uid in (0, os.getuid())
-            and not (st.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
-            and (st.st_mode & stat.S_IXUSR) != 0
-        )
-    except OSError:
-        return False
-
-
-def _run_sandboxed_cmd(cmd: List[str], timeout: float = 3.5) -> Optional[str]:
-    """Execute a system binary within a closed environment and dedicated process group."""
-    proc: Optional[subprocess.Popen] = None
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            env={"LC_ALL": "C"},
-            start_new_session=True,
-        )
-        stdout_b, _ = proc.communicate(timeout=timeout)
-        if proc.returncode == 0:
-            return stdout_b.decode("utf-8", errors="replace")
-    except Exception:
-        pass
-    finally:
-        if proc is not None and proc.poll() is None:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            try:
-                proc.wait(timeout=1.0)
-            except Exception:
-                pass
-    return None
-
-
-def check_network(host: str) -> Tuple[Optional[float], Optional[float]]:
-    """Measure ping RTT and HTTPS TTFB (in milliseconds) via pinned, verified binaries."""
+def check_network(host: str, deadline: float) -> Tuple[Optional[float], Optional[float]]:
+    """Measure ping RTT and HTTPS TTFB (in milliseconds) via verified root-owned binary fds."""
     if not validate_host(host):
         return None, None
 
     ping_ms: Optional[float] = None
-    if _verify_system_binary(PING_BIN):
-        out = _run_sandboxed_cmd([PING_BIN, "-c", "2", "-W", "2", "--", host], timeout=3.5)
-        if out:
-            match = re.search(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/", out)
-            if match:
+    if time.monotonic() < deadline:
+        ping_fd = open_verified_chain(PING_PATH, want_dir=False, require_root=True)
+        if ping_fd is not None:
+            try:
+                out = run_sandboxed_binary_fd(
+                    ping_fd, ["-c", "1", "-W", "1", "--", host], timeout=1.5
+                )
+                if out:
+                    match = re.search(r"rtt min/avg/max/mdev = [\d\.]+/([\d\.]+)/", out)
+                    if not match:
+                        match = re.search(r"time=([\d\.]+)\s*ms", out)
+                    if match:
+                        try:
+                            ping_ms = round(float(match.group(1)), 1)
+                        except ValueError:
+                            pass
+            finally:
                 try:
-                    ping_ms = round(float(match.group(1)), 1)
-                except ValueError:
+                    os.close(ping_fd)
+                except OSError:
                     pass
 
     ttfb_ms: Optional[float] = None
-    if _verify_system_binary(CURL_BIN):
-        out = _run_sandboxed_cmd([
-            CURL_BIN, "-o", "/dev/null", "-s",
-            "-w", "%{time_total}",
-            "--connect-timeout", "2",
-            "--max-time", "3",
-            "--",
-            f"https://{host}"
-        ], timeout=3.5)
-        if out:
+    if time.monotonic() < deadline:
+        curl_fd = open_verified_chain(CURL_PATH, want_dir=False, require_root=True)
+        if curl_fd is not None:
             try:
-                ttfb_ms = round(float(out.strip()) * 1000.0, 1)
-            except ValueError:
-                pass
+                out = run_sandboxed_binary_fd(
+                    curl_fd,
+                    [
+                        "-o", "/dev/null", "-s",
+                        "-w", "%{time_total}",
+                        "--connect-timeout", "1",
+                        "--max-time", "2",
+                        "--",
+                        f"https://{host}"
+                    ],
+                    timeout=2.0
+                )
+                if out:
+                    try:
+                        ttfb_ms = round(float(out.strip()) * 1000.0, 1)
+                    except ValueError:
+                        pass
+            finally:
+                try:
+                    os.close(curl_fd)
+                except OSError:
+                    pass
 
     return ping_ms, ttfb_ms
 
 
-def _open_log_dir_fd(log_dir: Path) -> Optional[int]:
-    """Open log_dir component by component with O_NOFOLLOW, verifying ownership and mode."""
-    try:
-        resolved = log_dir.resolve(strict=True)
-        if not resolved.is_absolute():
-            return None
-        parts = resolved.parts[1:]
-        if not parts:
-            return None
-        fd = os.open("/", os.O_DIRECTORY | os.O_CLOEXEC)
-        for part in parts:
-            flags = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-            next_fd = os.open(part, flags, dir_fd=fd)
-            os.close(fd)
-            fd = next_fd
-            st = os.fstat(fd)
-            if not stat.S_ISDIR(st.st_mode):
-                os.close(fd)
-                return None
-            if st.st_uid not in (0, os.getuid()):
-                os.close(fd)
-                return None
-            if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-                os.close(fd)
-                return None
-        return fd
-    except Exception:
-        return None
-
-
 def find_latest_log_name(dir_fd: int) -> Optional[str]:
-    """Find the most recently modified cli-*.log file name in the verified dir fd."""
+    """Find the newest regular cli-*.log file using os.scandir on the verified directory fd."""
     newest_name: Optional[str] = None
     newest_mtime: float = -1.0
 
     try:
-        for name in os.listdir(dir_fd):
-            if not LOG_FILENAME_RE.match(name):
-                continue
-            try:
-                st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-                if not stat.S_ISREG(st.st_mode):
+        with os.scandir(dir_fd) as it:
+            for entry in it:
+                if not LOG_FILENAME_RE.match(entry.name):
                     continue
-                if st.st_uid != os.getuid():
+                try:
+                    if not entry.is_file(follow_symlinks=False):
+                        continue
+                    st = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
+                        continue
+                    if st.st_mtime > newest_mtime:
+                        newest_mtime = st.st_mtime
+                        newest_name = entry.name
+                except OSError:
                     continue
-                if st.st_mtime > newest_mtime:
-                    newest_mtime = st.st_mtime
-                    newest_name = name
-            except OSError:
-                continue
     except OSError:
         return None
 
@@ -198,17 +159,25 @@ def find_latest_log_name(dir_fd: int) -> Optional[str]:
 
 
 def read_log_tail(dir_fd: int, filename: str) -> Optional[str]:
-    """Read at most MAX_LOG_READ_BYTES from the end of the log file without following symlinks."""
-    fd = -1
+    """Read at most MAX_LOG_READ_BYTES from the end of the log file without following symlinks.
+
+    Opens with O_NONBLOCK to prevent FIFO hangs, validates S_ISREG before reading,
+    and strips any leading partial line.
+    """
+    file_fd = -1
     try:
-        fd = os.open(
+        file_fd = os.open(
             filename,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
             dir_fd=dir_fd
         )
-        st = os.fstat(fd)
+        st = os.fstat(file_fd)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid():
             return None
+
+        # Reset non-blocking mode now that regular file status is verified
+        flags = fcntl.fcntl(file_fd, fcntl.F_GETFL)
+        fcntl.fcntl(file_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
 
         file_size = st.st_size
         if file_size <= 0:
@@ -216,12 +185,12 @@ def read_log_tail(dir_fd: int, filename: str) -> Optional[str]:
 
         to_read = min(file_size, MAX_LOG_READ_BYTES)
         if file_size > MAX_LOG_READ_BYTES:
-            os.lseek(fd, file_size - to_read, os.SEEK_SET)
+            os.lseek(file_fd, file_size - to_read, os.SEEK_SET)
 
-        raw_bytes = os.read(fd, to_read)
+        raw_bytes = os.read(file_fd, to_read)
         text = raw_bytes.decode("utf-8", errors="ignore")
 
-        # Discard the initial partial line if we did not read from byte 0
+        # Discard initial partial line if we sought past byte 0
         if file_size > MAX_LOG_READ_BYTES:
             first_nl = text.find("\n")
             if first_nl != -1:
@@ -233,9 +202,9 @@ def read_log_tail(dir_fd: int, filename: str) -> Optional[str]:
     except OSError:
         return None
     finally:
-        if fd != -1:
+        if file_fd != -1:
             try:
-                os.close(fd)
+                os.close(file_fd)
             except OSError:
                 pass
 
@@ -320,8 +289,9 @@ def get_latency_report(
     if not validate_host(host):
         host = DEFAULT_HOST
 
+    deadline = time.monotonic() + 2.5
     actual_log_dir = log_dir or DEFAULT_LOG_DIR
-    dir_fd = _open_log_dir_fd(actual_log_dir)
+    dir_fd = open_verified_chain(actual_log_dir, want_dir=True, require_root=False)
 
     turns: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
@@ -343,7 +313,7 @@ def get_latency_report(
     ping_ms: Optional[float] = None
     ttfb_ms: Optional[float] = None
     if enable_network:
-        ping_ms, ttfb_ms = check_network(host)
+        ping_ms, ttfb_ms = check_network(host, deadline=deadline)
 
     recent_turns = turns[-5:]
     avg_turn = (
@@ -388,7 +358,7 @@ def get_latency_report(
 
 
 def print_cli_report(data: Dict[str, Any]) -> None:
-    """Format and print the report for terminal CLI viewing."""
+    """Format and print the report for terminal CLI viewing without leaking traces."""
     net = data.get("network", {})
     ping = f"{net.get('ping_ms')} ms" if net.get("ping_ms") is not None else "Disabled/N/A"
     ttfb = f"{net.get('ttfb_ms')} ms" if net.get("ttfb_ms") is not None else "Disabled/N/A"

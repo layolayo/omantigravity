@@ -22,6 +22,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from secure_fs import open_verified_chain, owner_and_mode_ok
 try:
     from check_latency import get_latency_report
 except Exception:
@@ -40,63 +41,6 @@ CACHE_FILENAME = "antigravity-usage.json"
 # Environment variable fallback for the explicitly configured agy path, used
 # when this script isn't invoked with --agy-path (e.g. manual/CLI use).
 AGY_PATH_ENV_VAR = "OMANTIGRAVITY_AGY_PATH"
-
-
-def _owner_and_mode_ok(st: os.stat_result, *, writable_check: int) -> bool:
-    return st.st_uid in (0, os.getuid()) and not (st.st_mode & writable_check)
-
-
-def _open_verified_chain(resolved: Path, want_dir: bool) -> Optional[int]:
-    """Open `resolved` (an already symlink-free absolute path) by walking it
-    component by component with `openat(..., O_NOFOLLOW)`, verifying on each
-    open file descriptor -- never by re-stating a pathname -- that every
-    ancestor directory and the final target are owned by root or the current
-    user and are not group/other-writable.
-
-    Because each hop is opened relative to the fd of its verified parent and
-    the final fd is what gets returned (and later executed/opened), there is
-    no window between "check" and "use" where a path string could be
-    re-resolved through a swapped component: fails closed on any mismatch,
-    symlink, or ownership/permission problem anywhere in the chain.
-    """
-    parts = resolved.parts[1:]
-    if not parts:
-        return None
-
-    fd = os.open("/", os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        for i, part in enumerate(parts):
-            is_last = i == len(parts) - 1
-            flags = os.O_NOFOLLOW | os.O_CLOEXEC
-            flags |= os.O_DIRECTORY if not is_last or want_dir else os.O_RDONLY
-            try:
-                next_fd = os.open(part, flags, dir_fd=fd)
-            except OSError:
-                return None
-            os.close(fd)
-            fd = next_fd
-
-            st = os.fstat(fd)
-            if is_last:
-                expect_type = stat.S_ISDIR if want_dir else stat.S_ISREG
-                if not expect_type(st.st_mode):
-                    return None
-                if not _owner_and_mode_ok(st, writable_check=stat.S_IWGRP | stat.S_IWOTH):
-                    return None
-                if not want_dir and not (st.st_mode & stat.S_IXUSR):
-                    return None
-            else:
-                if not stat.S_ISDIR(st.st_mode):
-                    return None
-                if not _owner_and_mode_ok(st, writable_check=stat.S_IWGRP | stat.S_IWOTH):
-                    return None
-        return fd
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        return None
 
 
 def find_agy_binary(configured_path: Optional[str]) -> Optional[int]:
@@ -134,7 +78,7 @@ def find_agy_binary(configured_path: Optional[str]) -> Optional[int]:
     except (OSError, RuntimeError):
         return None
 
-    return _open_verified_chain(resolved, want_dir=False)
+    return open_verified_chain(resolved, want_dir=False, require_root=False)
 
 
 def _read_capped(proc: subprocess.Popen, timeout: float, max_bytes: int) -> tuple[bytes, bool]:
@@ -278,9 +222,93 @@ def get_cache_dir_fd() -> Optional[int]:
         return None
 
 
+def sanitize_cache_payload(data: Any) -> Optional[Dict[str, Any]]:
+    """Sanitize and bound cached data on read to prevent cache poisoning or trace leakage."""
+    if not isinstance(data, dict):
+        return None
+
+    # Redact / bound groups and buckets
+    raw_groups = data.get("groups", [])
+    if isinstance(raw_groups, list):
+        clean_groups = []
+        for grp in raw_groups[:10]:
+            if not isinstance(grp, dict):
+                continue
+            raw_buckets = grp.get("buckets", [])
+            clean_buckets = []
+            if isinstance(raw_buckets, list):
+                for b in raw_buckets[:10]:
+                    if isinstance(b, dict):
+                        clean_buckets.append({
+                            "id": str(b.get("id", ""))[:64],
+                            "name": str(b.get("name", "Limit"))[:64],
+                            "window": str(b.get("window", ""))[:32],
+                            "window_title": str(b.get("window_title", ""))[:64],
+                            "description": str(b.get("description", ""))[:256],
+                            "remaining_fraction": float(b.get("remaining_fraction", 1.0)),
+                            "remaining_pct": int(b.get("remaining_pct", 100)),
+                            "used_pct": int(b.get("used_pct", 0)),
+                            "reset_time": str(b.get("reset_time", ""))[:64],
+                            "reset_countdown": str(b.get("reset_countdown", ""))[:32],
+                            "reset_local": str(b.get("reset_local", ""))[:32],
+                            "reset_exact": str(b.get("reset_exact", ""))[:64],
+                            "alarming": bool(b.get("alarming", False)),
+                            "warning": bool(b.get("warning", False)),
+                        })
+            clean_groups.append({
+                "name": str(grp.get("name", "Unknown Group"))[:64],
+                "description": str(grp.get("description", ""))[:256],
+                "icon": str(grp.get("icon", "󰘧"))[:8],
+                "is_gemini": bool(grp.get("is_gemini", False)),
+                "buckets": clean_buckets,
+            })
+        data["groups"] = clean_groups
+
+    # Redact / bound latency
+    lat = data.get("latency")
+    if isinstance(lat, dict):
+        clean_lat: Dict[str, Any] = {
+            "status": str(lat.get("status", "ok"))[:16],
+            "timestamp": int(lat.get("timestamp", 0)),
+            "time": str(lat.get("time", ""))[:32],
+            "host": "daily-cloudcode-pa.googleapis.com",
+            "health": str(lat.get("health", "healthy"))[:16],
+            "average_turn_sec": lat.get("average_turn_sec"),
+            "network": {
+                "ping_ms": lat.get("network", {}).get("ping_ms") if isinstance(lat.get("network"), dict) else None,
+                "ttfb_ms": lat.get("network", {}).get("ttfb_ms") if isinstance(lat.get("network"), dict) else None,
+            },
+        }
+        clean_turns = []
+        for t in lat.get("recent_turns", [])[:5]:
+            if isinstance(t, dict):
+                clean_turns.append({
+                    "time": str(t.get("time", ""))[:16],
+                    "timestamp": int(t.get("timestamp", 0)),
+                    "duration_sec": float(t.get("duration_sec", 0.0)),
+                    "status": str(t.get("status", "fast"))[:16],
+                })
+        clean_lat["recent_turns"] = clean_turns
+
+        clean_errs = []
+        for e in lat.get("recent_errors", [])[:5]:
+            if isinstance(e, dict):
+                clean_errs.append({
+                    "time": str(e.get("time", ""))[:16],
+                    "timestamp": int(e.get("timestamp", 0)),
+                    "message": str(e.get("message", "Service error"))[:128],
+                    "is_capacity_error": bool(e.get("is_capacity_error", False)),
+                    "is_recent": bool(e.get("is_recent", False)),
+                })
+        clean_lat["recent_errors"] = clean_errs
+        data["latency"] = clean_lat
+
+    return data
+
+
 def read_cache(cache_dir_fd: int) -> Optional[Dict[str, Any]]:
     """Read the cache file relative to the verified cache directory fd,
-    without following symlinks, with a size cap."""
+    without following symlinks, with a size cap and sanitization."""
     try:
         fd = os.open(
             CACHE_FILENAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=cache_dir_fd
@@ -297,7 +325,7 @@ def read_cache(cache_dir_fd: int) -> Optional[Dict[str, Any]]:
             return None
         with os.fdopen(fd, "r", encoding="utf-8") as f:
             fd = -1  # ownership transferred to the file object
-            return json.load(f)
+            return sanitize_cache_payload(json.load(f))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     finally:
@@ -565,53 +593,31 @@ def main():
 
         try:
             # Run /usage and /model in parallel, with a non-blocking wall-clock timeout on latency
+            executor = ThreadPoolExecutor(max_workers=3)
             try:
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    fut_usage = executor.submit(run_agy_command, agy_fd, "/usage")
-                    fut_model = executor.submit(run_agy_command, agy_fd, "/model")
-                    fut_latency = (
-                        executor.submit(
-                            get_latency_report,
-                            enable_network=args.enable_network_checks
-                        )
-                        if get_latency_report
-                        else None
+                fut_usage = executor.submit(run_agy_command, agy_fd, "/usage")
+                fut_model = executor.submit(run_agy_command, agy_fd, "/model")
+                fut_latency = (
+                    executor.submit(
+                        get_latency_report,
+                        enable_network=args.enable_network_checks
                     )
-                    usage_res = fut_usage.result()
-                    model_res = fut_model.result()
-                    latency_res = None
-                    if fut_latency is not None:
-                        try:
-                            latency_res = fut_latency.result(timeout=4.0)
-                        except Exception:
-                            latency_res = None
+                    if get_latency_report
+                    else None
+                )
+                usage_res = fut_usage.result()
+                model_res = fut_model.result()
+                latency_res = None
+                if fut_latency is not None:
+                    try:
+                        latency_res = fut_latency.result(timeout=3.0)
+                    except Exception:
+                        latency_res = None
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
-                if not usage_res or usage_res.get("status") != "SUCCESS":
-                    # Attempt to use stale cache
-                    cached = _read_cache()
-                    if cached is not None:
-                        cached["stale"] = True
-                        print(json.dumps(cached, indent=2))
-                        return
-
-                    err_resp = {
-                        "status": "error",
-                        "error": "Failed to get usage limits from agy.",
-                        "groups": [],
-                        "overall": {"lowest_remaining_pct": 0, "alarming": False, "warning": False},
-                        "tooltip": "Failed to get Antigravity usage",
-                    }
-                    print(json.dumps(err_resp, indent=2))
-                    return
-
-                result = parse_usage_data(usage_res, model_res, latency_res)
-
-                # Save to cache
-                _write_cache(result)
-
-                print(json.dumps(result, indent=2))
-
-            except Exception:
+            if not usage_res or usage_res.get("status") != "SUCCESS":
+                # Attempt to use stale cache
                 cached = _read_cache()
                 if cached is not None:
                     cached["stale"] = True
@@ -620,12 +626,36 @@ def main():
 
                 err_resp = {
                     "status": "error",
-                    "error": "Failed to retrieve quota from Antigravity CLI.",
+                    "error": "Failed to get usage limits from agy.",
                     "groups": [],
                     "overall": {"lowest_remaining_pct": 0, "alarming": False, "warning": False},
                     "tooltip": "Failed to get Antigravity usage",
                 }
                 print(json.dumps(err_resp, indent=2))
+                return
+
+            result = parse_usage_data(usage_res, model_res, latency_res)
+
+            # Save to cache
+            _write_cache(result)
+
+            print(json.dumps(result, indent=2))
+
+        except Exception:
+            cached = _read_cache()
+            if cached is not None:
+                cached["stale"] = True
+                print(json.dumps(cached, indent=2))
+                return
+
+            err_resp = {
+                "status": "error",
+                "error": "Failed to retrieve quota from Antigravity CLI.",
+                "groups": [],
+                "overall": {"lowest_remaining_pct": 0, "alarming": False, "warning": False},
+                "tooltip": "Failed to get Antigravity usage",
+            }
+            print(json.dumps(err_resp, indent=2))
         finally:
             os.close(agy_fd)
     finally:
