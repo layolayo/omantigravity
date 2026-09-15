@@ -178,24 +178,51 @@ Panel {
     }
     root.notifiedAlerts = pruned
 
-    if (!root.enableNotifications || !root.hasAlerts) return
+    if (!root.enableNotifications) return
     var updated = Object.assign({}, root.notifiedAlerts)
-    for (var i = 0; i < root.activeAlerts.length; i++) {
-      var a = root.activeAlerts[i]
-      var key = a.id + "_" + root.alertThresholdPct
-      if (!updated[key]) {
-        updated[key] = true
-        notifyProc.command = [
-          root.notifySendBin,
-          "-a", "Antigravity",
-          "-u", "critical",
-          "-i", "dialog-warning",
-          "Antigravity Quota Alert",
-          a.group + " (" + a.bucket + ") reached " + a.pct + "% remaining (threshold: " + root.alertThresholdPct + "%)."
-        ]
-        notifyProc.running = true
+
+    if (root.hasAlerts) {
+      for (var i = 0; i < root.activeAlerts.length; i++) {
+        var a = root.activeAlerts[i]
+        var key = a.id + "_" + root.alertThresholdPct
+        if (!updated[key]) {
+          updated[key] = true
+          notifyProc.command = [
+            root.notifySendBin,
+            "-a", "Antigravity",
+            "-u", "critical",
+            "-i", "dialog-warning",
+            "Antigravity Quota Alert",
+            a.group + " (" + a.bucket + ") reached " + a.pct + "% remaining (threshold: " + root.alertThresholdPct + "%)."
+          ]
+          notifyProc.running = true
+        }
       }
     }
+
+    if (root.hasCapacityError) {
+      var lat = root.usageData ? root.usageData.latency : null
+      var errs = lat && lat.recent_errors ? lat.recent_errors : []
+      for (var j = 0; j < errs.length; j++) {
+        if (errs[j].is_capacity_error) {
+          var capKey = "capacity_" + errs[j].time
+          if (!updated[capKey]) {
+            updated[capKey] = true
+            notifyProc.command = [
+              root.notifySendBin,
+              "-a", "Antigravity",
+              "-u", "critical",
+              "-i", "dialog-warning",
+              "Antigravity Capacity Alert",
+              "Google model server capacity is exhausted (HTTP 503). Upstream requests are failing/retrying."
+            ]
+            notifyProc.running = true
+            break
+          }
+        }
+      }
+    }
+
     root.notifiedAlerts = updated
   }
 
