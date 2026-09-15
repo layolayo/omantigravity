@@ -213,8 +213,8 @@ Panel {
               "-a", "Antigravity",
               "-u", "critical",
               "-i", "dialog-warning",
-              "Antigravity Capacity Alert",
-              "Google model server capacity is exhausted (HTTP 503). Upstream requests are failing/retrying."
+              "Antigravity: Google Servers Busy",
+              "Google's AI model servers are full right now. Requests may pause or take longer while retrying."
             ]
             notifyProc.running = true
             break
@@ -388,7 +388,7 @@ Panel {
       if (lat) {
         var statusTag = ""
         if (root.hasCapacityError) {
-          statusTag = "🛑 503 Overload"
+          statusTag = "🛑 Google Servers Full"
         } else if (lat.health === "degraded") {
           statusTag = "🛑 High Latency"
         } else if (lat.health === "slow") {
@@ -580,7 +580,7 @@ Panel {
               Rectangle {
                 id: statusBadge
                 readonly property var lat: root.usageData ? root.usageData.latency : null
-                readonly property string hState: root.hasCapacityError ? "503 OVERLOAD" : (lat ? (lat.health === "degraded" ? "DEGRADED" : (lat.health === "slow" ? "SLOW" : "HEALTHY")) : "HEALTHY")
+                readonly property string hState: root.hasCapacityError ? "SERVERS FULL" : (lat ? (lat.health === "degraded" ? "DEGRADED" : (lat.health === "slow" ? "SLOW" : "HEALTHY")) : "HEALTHY")
                 readonly property color badgeColor: root.hasCapacityError || (lat && lat.health === "degraded") ? root.urgent : (lat && lat.health === "slow" ? root.warning : root.fg)
                 height: Style.space(18)
                 implicitWidth: statusText.implicitWidth + Style.space(10)
@@ -717,7 +717,7 @@ Panel {
 
                   Text {
                     Layout.fillWidth: true
-                    text: "503 Capacity Limit (" + modelData.time + ") — Model overloaded"
+                    text: "Google Servers at Capacity (" + modelData.time + ") — AI model overloaded, requests retrying"
                     color: root.urgent
                     font.family: root.fontFamily
                     font.pixelSize: 10
