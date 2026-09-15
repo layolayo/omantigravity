@@ -95,6 +95,7 @@ Settings can be toggled directly in the panel UI, configured via `omarchy bar se
 | `barMetric` | enum | `"gemini"` | Quota limit to show on the bar: `gemini`, `3p`, `lowest`, `gemini-5h`, `gemini-weekly`, `3p-5h`, `3p-weekly` |
 | `alertThresholdPct` | integer | `20` | Threshold percentage (5% – 50%) for low quota alerts |
 | `enableNotifications` | boolean | `true` | Send desktop notifications via `notify-send` when quota is critical |
+| `enableNetworkHealth` | boolean | `false` | Enable live ICMP ping and HTTPS TTFB probes to `daily-cloudcode-pa.googleapis.com`. When disabled (default), latency is derived solely from local CLI turn logs (zero unsolicited network beaconing). |
 | `showPercentageInBar` | boolean | `true` | Display remaining percentage next to the bar icon |
 | `pollIntervalSec` | integer | `300` | Background refresh interval in seconds (30s – 3600s) |
 | `barIcon` | string | `"λ"` | Icon glyph displayed on the bar |
@@ -124,6 +125,9 @@ omarchy bar set asdfsnlr.omantigravity alertThresholdPct 25 --json
 # Toggle desktop notifications
 omarchy bar set asdfsnlr.omantigravity enableNotifications false --json
 
+# Toggle active network health probes (ICMP ping & HTTPS TTFB)
+omarchy bar set asdfsnlr.omantigravity enableNetworkHealth true --json
+
 # Change poll interval (e.g. every 2 minutes)
 omarchy bar set asdfsnlr.omantigravity pollIntervalSec 120 --json
 ```
@@ -136,6 +140,8 @@ omarchy bar set asdfsnlr.omantigravity pollIntervalSec 120 --json
 | --- | --- |
 | **Open / Close Panel** | Left-click bar widget or press <kbd>Esc</kbd> |
 | **Force Fresh Refresh** | Right-click / Middle-click bar widget |
+| **Toggle Desktop Notifications** | Click `[Notify / Muted]` button in the panel header |
+| **Toggle Network Probes** | Click `[PROBES: ON / OFF]` button in the Cloud Service Status card header |
 | **Switch Active Group** | Click `[Gemini]`, `[Claude & GPT]`, or `[Lowest]` chips |
 | **Pin Specific Limit** | Click any progress bar row in the panel |
 | **Set Alert Threshold** | Click `[10%]`, `[15%]`, `[20%]`, `[25%]`, or `[30%]` chips |

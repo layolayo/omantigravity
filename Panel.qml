@@ -226,6 +226,12 @@ Panel {
     persistSettings({ enableNotifications: root.enableNotifications })
   }
 
+  function toggleNetworkHealth() {
+    root.enableNetworkHealth = !root.enableNetworkHealth
+    persistSettings({ enableNetworkHealth: root.enableNetworkHealth })
+    refresh(true)
+  }
+
   function checkAndNotify() {
     if (root.isStartingUp) return
     if (!root.enableNotifications) return
@@ -809,6 +815,44 @@ Panel {
                   font.bold: true
                 }
               }
+
+              // Toggle: Network Probes On/Off
+              Rectangle {
+                id: probeBadge
+                height: Style.space(18)
+                implicitWidth: probeText.implicitWidth + Style.space(10)
+                radius: Style.cornerRadius
+                color: root.enableNetworkHealth
+                  ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.15)
+                  : Qt.rgba(root.dim.r, root.dim.g, root.dim.b, 0.1)
+                border.width: 1
+                border.color: root.enableNetworkHealth ? root.fg : root.dim
+
+                Text {
+                  id: probeText
+                  anchors.centerIn: parent
+                  text: root.enableNetworkHealth ? "PROBES: ON" : "PROBES: OFF"
+                  color: root.enableNetworkHealth ? root.fg : root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: 9
+                  font.bold: true
+                }
+
+                MouseArea {
+                  id: probeMouse
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  hoverEnabled: true
+                  onClicked: root.toggleNetworkHealth()
+                }
+
+                PanelToolTip {
+                  visible: probeMouse.containsMouse
+                  text: root.enableNetworkHealth
+                    ? "Live ping & TTFB network probes are active (click to disable)"
+                    : "Live ping & TTFB network probes are disabled (click to enable)"
+                }
+              }
             }
 
             // Metrics row: Ping, TTFB, Avg Turn
@@ -827,10 +871,11 @@ Panel {
                 }
                 Text {
                   text: {
+                    if (!root.enableNetworkHealth) return "off"
                     var net = root.usageData && root.usageData.latency ? root.usageData.latency.network : null
                     return (net && net.ping_ms !== null && net.ping_ms !== undefined) ? (net.ping_ms + "ms") : "--"
                   }
-                  color: root.fg
+                  color: !root.enableNetworkHealth ? root.dim : root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -848,10 +893,11 @@ Panel {
                 }
                 Text {
                   text: {
+                    if (!root.enableNetworkHealth) return "off"
                     var net = root.usageData && root.usageData.latency ? root.usageData.latency.network : null
                     return (net && net.ttfb_ms !== null && net.ttfb_ms !== undefined) ? (net.ttfb_ms + "ms") : "--"
                   }
-                  color: root.fg
+                  color: !root.enableNetworkHealth ? root.dim : root.fg
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                   font.bold: true
