@@ -163,44 +163,37 @@ Panel {
     checkAndNotify()
   }
 
+  property double lastNotificationTimestamp: 0
+
+  function toggleNotifications() {
+    root.enableNotifications = !root.enableNotifications
+    persistSettings({ enableNotifications: root.enableNotifications })
+  }
+
   function checkAndNotify() {
-    // Drop any previously-notified bucket that has since recovered above the
-    // threshold (e.g. a 5h window reset), so the next time it drops back
-    // below the threshold it notifies again instead of staying silenced for
-    // the rest of the session.
     var activeKeys = {}
     for (var i = 0; i < root.activeAlerts.length; i++) {
       activeKeys[root.activeAlerts[i].id + "_" + root.alertThresholdPct] = true
     }
     var pruned = {}
     for (var existingKey in root.notifiedAlerts) {
-      if (activeKeys[existingKey]) pruned[existingKey] = true
+      if (activeKeys[existingKey] || existingKey.indexOf("capacity_") === 0) {
+        pruned[existingKey] = true
+      }
     }
     root.notifiedAlerts = pruned
 
     if (!root.enableNotifications) return
+
+    // Throttle: Never fire notifications more than once every 30 seconds
+    var now = Date.now()
+    if (now - root.lastNotificationTimestamp < 30000) return
+
     var updated = Object.assign({}, root.notifiedAlerts)
+    var notificationSent = false
 
-    if (root.hasAlerts) {
-      for (var i = 0; i < root.activeAlerts.length; i++) {
-        var a = root.activeAlerts[i]
-        var key = a.id + "_" + root.alertThresholdPct
-        if (!updated[key]) {
-          updated[key] = true
-          notifyProc.command = [
-            root.notifySendBin,
-            "-a", "Antigravity",
-            "-u", "critical",
-            "-i", "dialog-warning",
-            "Antigravity Quota Alert",
-            a.group + " (" + a.bucket + ") reached " + a.pct + "% remaining (threshold: " + root.alertThresholdPct + "%)."
-          ]
-          notifyProc.running = true
-        }
-      }
-    }
-
-    if (root.hasCapacityError) {
+    // 1. Capacity Overload Alert (Highest Priority)
+    if (root.hasCapacityError && !notificationSent) {
       var lat = root.usageData ? root.usageData.latency : null
       var errs = lat && lat.recent_errors ? lat.recent_errors : []
       for (var j = 0; j < errs.length; j++) {
@@ -217,12 +210,40 @@ Panel {
               "Google's AI model servers are full right now. Requests may pause or take longer while retrying."
             ]
             notifyProc.running = true
+            notificationSent = true
             break
           }
         }
       }
     }
 
+    // 2. Quota Alert (Consolidated: send one notification for the lowest bucket)
+    if (root.hasAlerts && !notificationSent && root.activeAlerts.length > 0) {
+      var lowestAlert = root.activeAlerts[0]
+      for (var k = 1; k < root.activeAlerts.length; k++) {
+        if (root.activeAlerts[k].pct < lowestAlert.pct) {
+          lowestAlert = root.activeAlerts[k]
+        }
+      }
+      var qKey = lowestAlert.id + "_" + root.alertThresholdPct
+      if (!updated[qKey]) {
+        updated[qKey] = true
+        notifyProc.command = [
+          root.notifySendBin,
+          "-a", "Antigravity",
+          "-u", "critical",
+          "-i", "dialog-warning",
+          "Antigravity Quota Alert",
+          lowestAlert.group + " (" + lowestAlert.bucket + ") reached " + lowestAlert.pct + "% remaining."
+        ]
+        notifyProc.running = true
+        notificationSent = true
+      }
+    }
+
+    if (notificationSent) {
+      root.lastNotificationTimestamp = now
+    }
     root.notifiedAlerts = updated
   }
 
@@ -855,6 +876,54 @@ Panel {
           }
 
           Item { Layout.fillWidth: true }
+
+          // Desktop Notification Toggle Button
+          Rectangle {
+            height: Style.space(24)
+            implicitWidth: notifRow.implicitWidth + Style.space(14)
+            radius: Style.cornerRadius
+            color: root.enableNotifications 
+              ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.16) 
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
+            border.width: 1
+            border.color: root.enableNotifications 
+              ? root.fg 
+              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.14)
+
+            RowLayout {
+              id: notifRow
+              anchors.centerIn: parent
+              spacing: Style.space(4)
+
+              Text {
+                text: root.enableNotifications ? "󰂚" : "󰂛"
+                color: root.enableNotifications ? root.fg : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                text: root.enableNotifications ? "Notify" : "Muted"
+                color: root.enableNotifications ? root.fg : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: root.enableNotifications
+              }
+            }
+
+            MouseArea {
+              id: notifMouse
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              hoverEnabled: true
+              onClicked: root.toggleNotifications()
+            }
+
+            PanelToolTip {
+              visible: notifMouse.containsMouse
+              text: root.enableNotifications ? "Desktop notifications enabled (click to mute)" : "Desktop notifications muted (click to enable)"
+            }
+          }
         }
 
         // ── Error View ─────────────────────────────────────────────────────
