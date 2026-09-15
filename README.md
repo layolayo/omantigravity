@@ -164,6 +164,21 @@ export OMANTIGRAVITY_AGY_PATH=~/.local/share/mise/shims/agy
 ./scripts/fetch_usage.py --force
 ```
 
+### Latency & Health Tracker (`scripts/check_latency.py`)
+
+A diagnostic utility that monitors real-time network ping, HTTPS TTFB, multi-turn AI response durations, and detects upstream HTTP 503 capacity exhaustion errors from Google's endpoint:
+
+```bash
+# Run one-shot health and latency diagnostic report
+./scripts/check_latency.py
+
+# Output structured JSON for automation or panel integration
+./scripts/check_latency.py --json
+
+# Continuously monitor every 10 seconds
+./scripts/check_latency.py --watch 10
+```
+
 ---
 
 ## Plugin Management
