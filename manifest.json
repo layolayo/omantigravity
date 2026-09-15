@@ -25,7 +25,8 @@
       "barMetric": "gemini",
       "barIcon": "λ",
       "alertThresholdPct": 20,
-      "enableNotifications": true
+      "enableNotifications": true,
+      "enableNetworkHealth": false
     },
     "schema": [
       {
@@ -91,6 +92,13 @@
         "label": "Desktop notifications",
         "description": "Send desktop notification when quota reaches alert threshold.",
         "defaultValue": true
+      },
+      {
+        "key": "enableNetworkHealth",
+        "type": "boolean",
+        "label": "Active network health check",
+        "description": "Perform ICMP ping and HTTPS TTFB latency measurements to Google servers (disabled by default to prevent unsolicited network traffic).",
+        "defaultValue": false
       }
     ]
   }

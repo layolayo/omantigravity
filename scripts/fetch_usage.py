@@ -122,7 +122,10 @@ def find_agy_binary(configured_path: Optional[str]) -> Optional[int]:
     if not raw:
         return None
 
-    candidate = Path(os.path.expanduser(os.path.expandvars(raw)))
+    if any(c in raw for c in ("$", "\0", "\n", "\r")):
+        return None
+
+    candidate = Path(os.path.expanduser(raw))
     if not candidate.is_absolute():
         return None
 
@@ -391,8 +394,8 @@ def parse_usage_data(
     latency_raw: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     cmd_data = usage_raw.get("command", {}).get("data", {})
-    raw_groups = cmd_data.get("groups", [])
-    general_desc = cmd_data.get("description", "")
+    raw_groups = cmd_data.get("groups", [])[:10]
+    general_desc = str(cmd_data.get("description", ""))[:256]
 
     parsed_groups: List[Dict[str, Any]] = []
     lowest_pct = 100
@@ -402,9 +405,9 @@ def parse_usage_data(
     summary_lines = []
 
     for grp in raw_groups:
-        grp_name = grp.get("name", "Unknown Group")
-        grp_desc = grp.get("description", "")
-        raw_buckets = grp.get("buckets", [])
+        grp_name = str(grp.get("name", "Unknown Group"))[:64]
+        grp_desc = str(grp.get("description", ""))[:256]
+        raw_buckets = grp.get("buckets", [])[:10]
 
         # Assign friendly icon
         is_gemini = "gemini" in grp_name.lower()
@@ -414,14 +417,14 @@ def parse_usage_data(
         bucket_summaries = []
 
         for b in raw_buckets:
-            b_id = b.get("id", "")
-            b_name = b.get("name", "Limit")
-            b_window = b.get("window", "")
-            b_desc = b.get("description", "")
+            b_id = str(b.get("id", ""))[:64]
+            b_name = str(b.get("name", "Limit"))[:64]
+            b_window = str(b.get("window", ""))[:32]
+            b_desc = str(b.get("description", ""))[:256]
             rem_frac = float(b.get("remaining_fraction", 1.0))
             rem_pct = max(0, min(100, int(round(rem_frac * 100))))
             used_pct = 100 - rem_pct
-            reset_time = b.get("reset_time", "")
+            reset_time = str(b.get("reset_time", ""))[:64]
             countdown = format_countdown(reset_time)
             local_reset = format_local_time(reset_time)
             exact_reset = format_exact_time(reset_time)
@@ -471,9 +474,9 @@ def parse_usage_data(
         m_data = model_raw.get("command", {}).get("data", {})
         if m_data:
             active_model = {
-                "id": m_data.get("id", ""),
-                "label": m_data.get("label", ""),
-                "effort": m_data.get("effort", ""),
+                "id": str(m_data.get("id", ""))[:64],
+                "label": str(m_data.get("label", ""))[:128],
+                "effort": str(m_data.get("effort", ""))[:32],
             }
 
     tooltip = "Antigravity Quota\n" + ("\n".join(summary_lines) if summary_lines else "No limits reported")
@@ -508,6 +511,11 @@ def main():
         default=None,
         help="Explicit path to the agy binary (required; also settable via "
         f"the {AGY_PATH_ENV_VAR} env var). Never auto-discovered.",
+    )
+    parser.add_argument(
+        "--enable-network-checks",
+        action="store_true",
+        help="Enable active network ping and TTFB checks in latency tracker",
     )
     args = parser.parse_args()
 
@@ -556,15 +564,27 @@ def main():
             return
 
         try:
-            # Run /usage and /model in parallel
+            # Run /usage and /model in parallel, with a non-blocking wall-clock timeout on latency
             try:
                 with ThreadPoolExecutor(max_workers=3) as executor:
                     fut_usage = executor.submit(run_agy_command, agy_fd, "/usage")
                     fut_model = executor.submit(run_agy_command, agy_fd, "/model")
-                    fut_latency = executor.submit(get_latency_report) if get_latency_report else None
+                    fut_latency = (
+                        executor.submit(
+                            get_latency_report,
+                            enable_network=args.enable_network_checks
+                        )
+                        if get_latency_report
+                        else None
+                    )
                     usage_res = fut_usage.result()
                     model_res = fut_model.result()
-                    latency_res = fut_latency.result() if fut_latency else None
+                    latency_res = None
+                    if fut_latency is not None:
+                        try:
+                            latency_res = fut_latency.result(timeout=4.0)
+                        except Exception:
+                            latency_res = None
 
                 if not usage_res or usage_res.get("status") != "SUCCESS":
                     # Attempt to use stale cache
@@ -591,7 +611,7 @@ def main():
 
                 print(json.dumps(result, indent=2))
 
-            except Exception as e:
+            except Exception:
                 cached = _read_cache()
                 if cached is not None:
                     cached["stale"] = True
@@ -600,10 +620,10 @@ def main():
 
                 err_resp = {
                     "status": "error",
-                    "error": str(e),
+                    "error": "Failed to retrieve quota from Antigravity CLI.",
                     "groups": [],
                     "overall": {"lowest_remaining_pct": 0, "alarming": False, "warning": False},
-                    "tooltip": f"Error: {e}",
+                    "tooltip": "Failed to get Antigravity usage",
                 }
                 print(json.dumps(err_resp, indent=2))
         finally:

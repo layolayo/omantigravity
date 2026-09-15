@@ -29,6 +29,7 @@ Panel {
   property string barIcon: "λ"
   property int alertThresholdPct: 20
   property bool enableNotifications: true
+  property bool enableNetworkHealth: false
 
   // ── Computed Alerts ─────────────────────────────────────────────────────────
   readonly property var activeAlerts: Model.findAlerts(root.usageData, root.alertThresholdPct)
@@ -106,14 +107,15 @@ Panel {
   }
 
   function applySettings() {
-    agyPath = String(setting("agyPath", ""))
+    agyPath = String(setting("agyPath", "")).slice(0, 1024)
     pollIntervalSec = Math.max(30, Math.min(3600, setting("pollIntervalSec", 300)))
     pollTimer.interval = pollIntervalSec * 1000
     showPercentageInBar = setting("showPercentageInBar", true)
     barMetric = setting("barMetric", "gemini")
-    barIcon = setting("barIcon", "λ")
+    barIcon = String(setting("barIcon", "λ")).slice(0, 8)
     alertThresholdPct = Math.max(5, Math.min(50, setting("alertThresholdPct", 20)))
     enableNotifications = setting("enableNotifications", true)
+    enableNetworkHealth = setting("enableNetworkHealth", false)
   }
 
   function isExactReset(bucketId) {
@@ -157,13 +159,17 @@ Panel {
       root.bar.shell.updateEntryInline(root.moduleName, entry)
     } else {
       // Fallback via CLI if not embedded in running omarchy-shell
-      for (var k in values) {
-        var val = values[k]
-        var isJson = (typeof val === "number" || typeof val === "boolean")
-        saveConfigProc.command = isJson
-          ? [root.omarchyBin, "bar", "set", root.moduleName, k, String(val), "--json"]
-          : [root.omarchyBin, "bar", "set", root.moduleName, k, String(val)]
-        saveConfigProc.running = true
+      if (!saveConfigProc.running) {
+        var keys = Object.keys(values)
+        if (keys.length > 0) {
+          var k = keys[0]
+          var val = values[k]
+          var isJson = (typeof val === "number" || typeof val === "boolean")
+          saveConfigProc.command = isJson
+            ? [root.omarchyBin, "bar", "set", root.moduleName, k, String(val), "--json"]
+            : [root.omarchyBin, "bar", "set", root.moduleName, k, String(val)]
+          saveConfigProc.running = true
+        }
       }
     }
   }
@@ -288,13 +294,15 @@ Panel {
       var qKey = lowestAlert.id + "_" + root.alertThresholdPct
       if (!updated[qKey]) {
         updated[qKey] = true
+        var grpText = String(lowestAlert.group || "").slice(0, 48)
+        var bktText = String(lowestAlert.bucket || "").slice(0, 32)
         notifyProc.command = [
           root.notifySendBin,
           "-a", "Antigravity",
           "-u", "critical",
           "-i", "dialog-warning",
           "Antigravity: Quota Limit Alert",
-          lowestAlert.group + " (" + lowestAlert.bucket + ") reached " + lowestAlert.pct + "% remaining."
+          grpText + " (" + bktText + ") reached " + lowestAlert.pct + "% remaining."
         ]
         notifyProc.running = true
         notificationSent = true
@@ -345,6 +353,7 @@ Panel {
     if (force) args.push("--force")
     else args.push("--cached")
     if (root.agyPath.length > 0) args.push("--agy-path", root.agyPath)
+    if (root.enableNetworkHealth) args.push("--enable-network-checks")
     fetchProc.command = args
     fetchProc.running = true
   }
@@ -444,6 +453,19 @@ Panel {
     running: true
     repeat: true
     onTriggered: root.refresh(false)
+  }
+
+  // Watchdog: Terminate fetchProc if it exceeds 25 seconds to avoid permanent loading state
+  Timer {
+    id: fetchWatchdogTimer
+    interval: 25000
+    running: fetchProc.running
+    repeat: false
+    onTriggered: {
+      if (fetchProc.running) {
+        fetchProc.running = false
+      }
+    }
   }
 
   // ── IPC Handler ─────────────────────────────────────────────────────────────
