@@ -9,6 +9,7 @@ import "Model.js" as Model
 
 Panel {
   id: root
+  readonly property var panelRoot: root
   moduleName: "omantigravity"
   ipcTarget: "omantigravity"
   manageIpc: false
@@ -580,6 +581,56 @@ Panel {
               font.bold: true
             }
           }
+          trailingControl: Component {
+            Rectangle {
+              width: implicitWidth
+              height: Style.space(24)
+              implicitWidth: notifRow.implicitWidth + Style.space(14)
+              implicitHeight: Style.space(24)
+              radius: Style.cornerRadius
+              color: panelRoot.enableNotifications 
+                ? Qt.rgba(panelRoot.fg.r, panelRoot.fg.g, panelRoot.fg.b, 0.16) 
+                : Qt.rgba(panelRoot.fg.r, panelRoot.fg.g, panelRoot.fg.b, 0.04)
+              border.width: 1
+              border.color: panelRoot.enableNotifications 
+                ? panelRoot.fg 
+                : Qt.rgba(panelRoot.fg.r, panelRoot.fg.g, panelRoot.fg.b, 0.14)
+
+              RowLayout {
+                id: notifRow
+                anchors.centerIn: parent
+                spacing: Style.space(4)
+
+                Text {
+                  text: panelRoot.enableNotifications ? "󰂚" : "󰂛"
+                  color: panelRoot.enableNotifications ? panelRoot.fg : panelRoot.dim
+                  font.family: panelRoot.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Text {
+                  text: panelRoot.enableNotifications ? "Notify" : "Muted"
+                  color: panelRoot.enableNotifications ? panelRoot.fg : panelRoot.dim
+                  font.family: panelRoot.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: panelRoot.enableNotifications
+                }
+              }
+
+              MouseArea {
+                id: notifMouse
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                hoverEnabled: true
+                onClicked: panelRoot.toggleNotifications()
+              }
+
+              PanelToolTip {
+                visible: notifMouse.containsMouse
+                text: panelRoot.enableNotifications ? "Desktop notifications enabled (click to mute)" : "Desktop notifications muted (click to enable)"
+              }
+            }
+          }
         }
 
         PanelSeparator {
@@ -947,7 +998,7 @@ Panel {
           Item { Layout.fillWidth: true }
         }
 
-        // ── Alert Threshold & Notification Controls (Rectangular & Minimalist)
+        // ── Alert Threshold Controls (Rectangular & Minimalist)
         RowLayout {
           Layout.fillWidth: true
           spacing: Style.space(6)
@@ -995,54 +1046,6 @@ Panel {
           }
 
           Item { Layout.fillWidth: true }
-
-          // Desktop Notification Toggle Button
-          Rectangle {
-            height: Style.space(24)
-            implicitWidth: notifRow.implicitWidth + Style.space(14)
-            radius: Style.cornerRadius
-            color: root.enableNotifications 
-              ? Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.16) 
-              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.04)
-            border.width: 1
-            border.color: root.enableNotifications 
-              ? root.fg 
-              : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.14)
-
-            RowLayout {
-              id: notifRow
-              anchors.centerIn: parent
-              spacing: Style.space(4)
-
-              Text {
-                text: root.enableNotifications ? "󰂚" : "󰂛"
-                color: root.enableNotifications ? root.fg : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Text {
-                text: root.enableNotifications ? "Notify" : "Muted"
-                color: root.enableNotifications ? root.fg : root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                font.bold: root.enableNotifications
-              }
-            }
-
-            MouseArea {
-              id: notifMouse
-              anchors.fill: parent
-              cursorShape: Qt.PointingHandCursor
-              hoverEnabled: true
-              onClicked: root.toggleNotifications()
-            }
-
-            PanelToolTip {
-              visible: notifMouse.containsMouse
-              text: root.enableNotifications ? "Desktop notifications enabled (click to mute)" : "Desktop notifications muted (click to enable)"
-            }
-          }
         }
 
         // ── Error View ─────────────────────────────────────────────────────
