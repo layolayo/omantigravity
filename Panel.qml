@@ -49,10 +49,17 @@ Panel {
     }
     return false
   }
-  readonly property bool isApiDegraded: {
+  readonly property bool isHighLatency: {
     var lat = root.usageData ? root.usageData.latency : null
-    return !!(lat && (lat.health === "degraded" || lat.health === "slow" || root.hasCapacityError))
+    if (!lat) return false
+    return (lat.average_turn_sec !== null && lat.average_turn_sec !== undefined && lat.average_turn_sec > 15) || (lat.health === "degraded" && !root.hasCapacityError)
   }
+  readonly property bool isSlowLatency: {
+    var lat = root.usageData ? root.usageData.latency : null
+    if (!lat) return false
+    return (lat.average_turn_sec !== null && lat.average_turn_sec !== undefined && lat.average_turn_sec > 8) || lat.health === "slow"
+  }
+  readonly property bool isApiDegraded: isHighLatency || isSlowLatency || root.hasCapacityError
 
   // ── Theme / Palette ─────────────────────────────────────────────────────────
   readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
@@ -187,15 +194,21 @@ Panel {
 
   function seedHistoricalAlerts() {
     var updated = Object.assign({}, root.notifiedAlerts)
+    // 1. Seed Quota alerts
     for (var i = 0; i < root.activeAlerts.length; i++) {
       updated[root.activeAlerts[i].id + "_" + root.alertThresholdPct] = true
     }
+    // 2. Seed Capacity errors
     var lat = root.usageData ? root.usageData.latency : null
     var errs = lat && lat.recent_errors ? lat.recent_errors : []
     for (var j = 0; j < errs.length; j++) {
       if (errs[j].is_capacity_error) {
         updated["capacity_" + errs[j].time] = true
       }
+    }
+    // 3. Seed Latency alert
+    if (root.isHighLatency) {
+      updated["latency_high"] = true
     }
     root.notifiedAlerts = updated
     root.lastNotificationTimestamp = Date.now()
@@ -216,7 +229,7 @@ Panel {
     }
     var pruned = {}
     for (var existingKey in root.notifiedAlerts) {
-      if (activeKeys[existingKey] || existingKey.indexOf("capacity_") === 0) {
+      if (activeKeys[existingKey] || existingKey.indexOf("capacity_") === 0 || existingKey === "latency_high") {
         pruned[existingKey] = true
       }
     }
@@ -230,7 +243,7 @@ Panel {
     var updated = Object.assign({}, root.notifiedAlerts)
     var notificationSent = false
 
-    // 1. Capacity Overload Alert (Highest Priority)
+    // ── Metric 1: Capacity Overload Alert (Highest Priority) ──
     if (root.hasCapacityError && !notificationSent) {
       var lat = root.usageData ? root.usageData.latency : null
       var errs = lat && lat.recent_errors ? lat.recent_errors : []
@@ -251,8 +264,8 @@ Panel {
                 "-a", "Antigravity",
                 "-u", "critical",
                 "-i", "dialog-warning",
-                "Antigravity: Google Servers Busy",
-                "AI model servers are currently at capacity. Requests may pause while retrying."
+                "Antigravity: Server Capacity Alert",
+                "Google's AI model servers are currently at capacity. Requests may pause while retrying."
               ]
               notifyProc.running = true
               notificationSent = true
@@ -263,7 +276,7 @@ Panel {
       }
     }
 
-    // 2. Quota Alert (Consolidated: send one notification for the lowest bucket)
+    // ── Metric 2: Quota Alert (Consolidated: send one notification for lowest bucket) ──
     if (root.hasAlerts && !notificationSent && root.activeAlerts.length > 0) {
       var lowestAlert = root.activeAlerts[0]
       for (var m = 1; m < root.activeAlerts.length; m++) {
@@ -279,12 +292,36 @@ Panel {
           "-a", "Antigravity",
           "-u", "critical",
           "-i", "dialog-warning",
-          "Antigravity Quota Alert",
+          "Antigravity: Quota Limit Alert",
           lowestAlert.group + " (" + lowestAlert.bucket + ") reached " + lowestAlert.pct + "% remaining."
         ]
         notifyProc.running = true
         notificationSent = true
       }
+    }
+
+    // ── Metric 3: Latency Alert (Trigger on severe turn duration degradation > 20s) ──
+    if (root.isHighLatency && !notificationSent) {
+      var latObj = root.usageData ? root.usageData.latency : null
+      if (latObj && latObj.average_turn_sec && latObj.average_turn_sec > 20) {
+        var latKey = "latency_high"
+        if (!updated[latKey]) {
+          updated[latKey] = true
+          notifyProc.command = [
+            root.notifySendBin,
+            "-a", "Antigravity",
+            "-u", "normal",
+            "-i", "dialog-warning",
+            "Antigravity: High Latency Alert",
+            "API response time is currently " + latObj.average_turn_sec + "s per turn (High Latency)."
+          ]
+          notifyProc.running = true
+          notificationSent = true
+        }
+      }
+    } else if (!root.isHighLatency && updated["latency_high"]) {
+      // Clear flag when recovered so future spikes can notify
+      delete updated["latency_high"]
     }
 
     if (notificationSent) {
@@ -426,49 +463,64 @@ Panel {
     bar: root.bar
     text: {
       var prefix = ""
-      if (root.hasAlerts) {
-        prefix = "󰀨 "
-      } else if (root.hasCapacityError) {
-        prefix = "󰀨 "
-      } else if (root.isApiDegraded) {
-        prefix = "󰓅 "
+      if (root.hasCapacityError) {
+        prefix = "󰒋 " // Metric 1: Capacity overload
+      } else if (root.hasAlerts) {
+        prefix = "󰔚 " // Metric 2: Quota limit reached
+      } else if (root.isHighLatency) {
+        prefix = "󰓅 " // Metric 3: High Latency (>15s)
+      } else if (root.isSlowLatency) {
+        prefix = "󰓅 " // Metric 3: Slow Latency (>8s)
       }
       return prefix + Model.formatBarText(root.usageData, root.showPercentageInBar, root.barIcon, root.barMetric)
     }
     fixedWidth: -1
-    active: root.hasAlerts || root.isApiDegraded
+    active: root.hasAlerts || root.hasCapacityError || root.isHighLatency || root.isSlowLatency
     useActiveColor: true
-    activeColor: (root.hasAlerts || root.hasCapacityError) ? root.urgent : (root.isApiDegraded ? root.warning : root.fg)
+    activeColor: (root.hasCapacityError || root.hasAlerts || root.isHighLatency) ? root.urgent : (root.isSlowLatency ? root.warning : root.fg)
     tooltipText: {
-      var base = root.usageData && root.usageData.tooltip ? root.usageData.tooltip : "Antigravity CLI Quota"
-      var lat = root.usageData ? root.usageData.latency : null
-      var latSec = (lat && lat.average_turn_sec) ? (lat.average_turn_sec + "s") : ""
-      var pingStr = (lat && lat.network && lat.network.ping_ms !== null && lat.network.ping_ms !== undefined) ? (lat.network.ping_ms + "ms") : ""
-
       var lines = []
-      if (root.hasAlerts) {
-        lines.push("⚠️ LOW QUOTA ALERT! (≤" + root.alertThresholdPct + "%)")
+
+      // ── Metric 1: Quota ──
+      var qHeader = root.hasAlerts ? "📊 Quota (⚠️ LOW LIMIT ≤" + root.alertThresholdPct + "%):" : "📊 Quota:"
+      lines.push(qHeader)
+      if (root.usageData && root.usageData.groups && root.usageData.groups.length > 0) {
+        for (var g = 0; g < root.usageData.groups.length; g++) {
+          var grp = root.usageData.groups[g]
+          var bParts = []
+          for (var b = 0; b < (grp.buckets || []).length; b++) {
+            var bkt = grp.buckets[b]
+            bParts.push(bkt.window + ": " + bkt.remaining_pct + "%")
+          }
+          lines.push("   • " + grp.name + ": " + bParts.join(" · "))
+        }
+      } else {
+        var base = root.usageData && root.usageData.tooltip ? root.usageData.tooltip : "Loading..."
+        lines.push("   " + base)
       }
 
-      lines.push(base)
+      // ── Metric 2: Capacity ──
+      if (root.hasCapacityError) {
+        lines.push("🏢 Capacity: 🛑 At Capacity (Google servers full · retrying)")
+      } else {
+        lines.push("🏢 Capacity: 🟢 Available")
+      }
 
+      // ── Metric 3: Latency ──
+      var lat = root.usageData ? root.usageData.latency : null
       if (lat) {
-        var statusTag = ""
-        if (root.hasCapacityError) {
-          statusTag = "🛑 Servers Full"
-        } else if (lat.health === "degraded") {
-          statusTag = "🛑 High Latency"
-        } else if (lat.health === "slow") {
-          statusTag = "🟡 Slow"
-        } else {
-          statusTag = "🟢 Healthy"
-        }
-
         var details = []
-        if (latSec) details.push(latSec)
-        if (pingStr) details.push("ping " + pingStr)
+        if (lat.average_turn_sec !== null && lat.average_turn_sec !== undefined) details.push(lat.average_turn_sec + "s turn")
+        if (lat.network && lat.network.ping_ms !== null && lat.network.ping_ms !== undefined) details.push("ping " + lat.network.ping_ms + "ms")
         var detailStr = details.length > 0 ? " (" + details.join(" · ") + ")" : ""
-        lines.push("API: " + statusTag + detailStr)
+
+        if (root.isHighLatency) {
+          lines.push("⚡ Latency: 🛑 High" + detailStr)
+        } else if (root.isSlowLatency) {
+          lines.push("⚡ Latency: 🟡 Slow" + detailStr)
+        } else {
+          lines.push("⚡ Latency: 🟢 Fast" + detailStr)
+        }
       }
 
       return lines.join("\n")
@@ -586,15 +638,12 @@ Panel {
           visible: root.usageData && !!root.usageData.latency
           Layout.fillWidth: true
           color: {
-            var lat = root.usageData ? root.usageData.latency : null
-            if (root.hasCapacityError || (lat && lat.health === "degraded")) return Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.12)
-            if (lat && lat.health === "slow") return Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.10)
+            if (root.hasCapacityError || root.isHighLatency) return Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.12)
+            if (root.isSlowLatency) return Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.10)
             return root.subtle
           }
           borderSpec: Border.flat(
-            root.hasCapacityError || (root.usageData && root.usageData.latency && root.usageData.latency.health === "degraded") 
-              ? root.urgent 
-              : ((root.usageData && root.usageData.latency && root.usageData.latency.health === "slow") ? root.warning : root.borderCol), 
+            (root.hasCapacityError || root.isHighLatency) ? root.urgent : (root.isSlowLatency ? root.warning : root.borderCol), 
             1
           )
           radius: Style.cornerRadius
@@ -609,24 +658,20 @@ Panel {
             anchors.margins: Style.space(8)
             spacing: Style.space(6)
 
-            // Header Row: Icon, Title, Status Badge
+            // Header Row: Icon, Title, Capacity Badge, Latency Badge
             RowLayout {
               Layout.fillWidth: true
               spacing: Style.space(6)
 
               Text {
                 text: {
-                  var lat = root.usageData ? root.usageData.latency : null
-                  if (root.hasCapacityError) return "󰀨"
-                  if (!lat) return "󰓅"
-                  if (lat.health === "degraded") return "󰀨"
-                  if (lat.health === "slow") return "󰀦"
-                  return "󰓅"
+                  if (root.hasCapacityError) return "󰒋"
+                  if (root.isHighLatency || root.isSlowLatency) return "󰓅"
+                  return "󰒋"
                 }
                 color: {
-                  var lat = root.usageData ? root.usageData.latency : null
-                  if (root.hasCapacityError || (lat && lat.health === "degraded")) return root.urgent
-                  if (lat && lat.health === "slow") return root.warning
+                  if (root.hasCapacityError || root.isHighLatency) return root.urgent
+                  if (root.isSlowLatency) return root.warning
                   return root.fg
                 }
                 font.family: root.fontFamily
@@ -634,7 +679,7 @@ Panel {
               }
 
               Text {
-                text: "Google Antigravity API Health"
+                text: "Cloud Service Status"
                 color: root.fg
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -643,26 +688,49 @@ Panel {
 
               Item { Layout.fillWidth: true }
 
-              // Status Tag Badge
+              // Metric 1: Capacity Status Badge
               Rectangle {
-                id: statusBadge
-                readonly property var lat: root.usageData ? root.usageData.latency : null
-                readonly property string hState: root.hasCapacityError ? "SERVERS FULL" : (lat ? (lat.health === "degraded" ? "DEGRADED" : (lat.health === "slow" ? "SLOW" : "HEALTHY")) : "HEALTHY")
-                readonly property color badgeColor: root.hasCapacityError || (lat && lat.health === "degraded") ? root.urgent : (lat && lat.health === "slow" ? root.warning : root.fg)
+                id: capacityBadge
+                readonly property color badgeCol: root.hasCapacityError ? root.urgent : root.fg
                 height: Style.space(18)
-                implicitWidth: statusText.implicitWidth + Style.space(10)
+                implicitWidth: capText.implicitWidth + Style.space(10)
                 radius: Style.cornerRadius
-                color: root.hasCapacityError || (lat && lat.health === "degraded")
+                color: root.hasCapacityError
                   ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.22)
-                  : (lat && lat.health === "slow" ? Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.22) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1))
+                  : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1)
                 border.width: 1
-                border.color: badgeColor
+                border.color: badgeCol
 
                 Text {
-                  id: statusText
+                  id: capText
                   anchors.centerIn: parent
-                  text: statusBadge.hState
-                  color: statusBadge.badgeColor
+                  text: root.hasCapacityError ? "CAPACITY: FULL" : "CAPACITY: OK"
+                  color: capacityBadge.badgeCol
+                  font.family: root.fontFamily
+                  font.pixelSize: 9
+                  font.bold: true
+                }
+              }
+
+              // Metric 2: Latency Status Badge
+              Rectangle {
+                id: latencyBadge
+                readonly property string latState: root.isHighLatency ? "LATENCY: HIGH" : (root.isSlowLatency ? "LATENCY: SLOW" : "LATENCY: FAST")
+                readonly property color latColor: root.isHighLatency ? root.urgent : (root.isSlowLatency ? root.warning : root.fg)
+                height: Style.space(18)
+                implicitWidth: latStatusText.implicitWidth + Style.space(10)
+                radius: Style.cornerRadius
+                color: root.isHighLatency
+                  ? Qt.rgba(root.urgent.r, root.urgent.g, root.urgent.b, 0.22)
+                  : (root.isSlowLatency ? Qt.rgba(root.warning.r, root.warning.g, root.warning.b, 0.22) : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.1))
+                border.width: 1
+                border.color: latColor
+
+                Text {
+                  id: latStatusText
+                  anchors.centerIn: parent
+                  text: latencyBadge.latState
+                  color: latencyBadge.latColor
                   font.family: root.fontFamily
                   font.pixelSize: 9
                   font.bold: true
