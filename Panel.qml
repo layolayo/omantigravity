@@ -35,8 +35,17 @@ Panel {
   readonly property bool hasCapacityError: {
     var lat = root.usageData ? root.usageData.latency : null
     if (!lat || !lat.recent_errors) return false
+    var nowSec = Date.now() / 1000
     for (var i = 0; i < lat.recent_errors.length; i++) {
-      if (lat.recent_errors[i].is_capacity_error) return true
+      var err = lat.recent_errors[i]
+      if (err.is_capacity_error) {
+        if (err.is_recent !== undefined) {
+          if (err.is_recent) return true
+        } else {
+          var errTs = err.timestamp || 0
+          if (errTs > 0 && (nowSec - errTs) <= 300) return true
+        }
+      }
     }
     return false
   }
@@ -164,6 +173,33 @@ Panel {
   }
 
   property double lastNotificationTimestamp: 0
+  property bool isStartingUp: true
+
+  Timer {
+    id: startupGraceTimer
+    interval: 5000
+    running: true
+    repeat: false
+    onTriggered: {
+      root.isStartingUp = false
+    }
+  }
+
+  function seedHistoricalAlerts() {
+    var updated = Object.assign({}, root.notifiedAlerts)
+    for (var i = 0; i < root.activeAlerts.length; i++) {
+      updated[root.activeAlerts[i].id + "_" + root.alertThresholdPct] = true
+    }
+    var lat = root.usageData ? root.usageData.latency : null
+    var errs = lat && lat.recent_errors ? lat.recent_errors : []
+    for (var j = 0; j < errs.length; j++) {
+      if (errs[j].is_capacity_error) {
+        updated["capacity_" + errs[j].time] = true
+      }
+    }
+    root.notifiedAlerts = updated
+    root.lastNotificationTimestamp = Date.now()
+  }
 
   function toggleNotifications() {
     root.enableNotifications = !root.enableNotifications
@@ -171,6 +207,9 @@ Panel {
   }
 
   function checkAndNotify() {
+    if (root.isStartingUp) return
+    if (!root.enableNotifications) return
+
     var activeKeys = {}
     for (var i = 0; i < root.activeAlerts.length; i++) {
       activeKeys[root.activeAlerts[i].id + "_" + root.alertThresholdPct] = true
@@ -183,10 +222,9 @@ Panel {
     }
     root.notifiedAlerts = pruned
 
-    if (!root.enableNotifications) return
-
     // Throttle: Never fire notifications more than once every 30 seconds
     var now = Date.now()
+    var nowSec = now / 1000
     if (now - root.lastNotificationTimestamp < 30000) return
 
     var updated = Object.assign({}, root.notifiedAlerts)
@@ -196,22 +234,30 @@ Panel {
     if (root.hasCapacityError && !notificationSent) {
       var lat = root.usageData ? root.usageData.latency : null
       var errs = lat && lat.recent_errors ? lat.recent_errors : []
-      for (var j = 0; j < errs.length; j++) {
+      // Check from newest error backwards
+      for (var j = errs.length - 1; j >= 0; j--) {
         if (errs[j].is_capacity_error) {
-          var capKey = "capacity_" + errs[j].time
-          if (!updated[capKey]) {
-            updated[capKey] = true
-            notifyProc.command = [
-              root.notifySendBin,
-              "-a", "Antigravity",
-              "-u", "critical",
-              "-i", "dialog-warning",
-              "Antigravity: Google Servers Busy",
-              "Google's AI model servers are full right now. Requests may pause or take longer while retrying."
-            ]
-            notifyProc.running = true
-            notificationSent = true
-            break
+          var errTs = errs[j].timestamp || 0
+          var isFresh = errs[j].is_recent !== undefined ? errs[j].is_recent : (errTs > 0 && (nowSec - errTs) <= 180)
+          if (isFresh) {
+            var capKey = "capacity_" + errs[j].time
+            if (!updated[capKey]) {
+              // Mark all errors as seen to avoid cascading alerts
+              for (var k = 0; k < errs.length; k++) {
+                updated["capacity_" + errs[k].time] = true
+              }
+              notifyProc.command = [
+                root.notifySendBin,
+                "-a", "Antigravity",
+                "-u", "critical",
+                "-i", "dialog-warning",
+                "Antigravity: Google Servers Busy",
+                "AI model servers are currently at capacity. Requests may pause while retrying."
+              ]
+              notifyProc.running = true
+              notificationSent = true
+              break
+            }
           }
         }
       }
@@ -220,9 +266,9 @@ Panel {
     // 2. Quota Alert (Consolidated: send one notification for the lowest bucket)
     if (root.hasAlerts && !notificationSent && root.activeAlerts.length > 0) {
       var lowestAlert = root.activeAlerts[0]
-      for (var k = 1; k < root.activeAlerts.length; k++) {
-        if (root.activeAlerts[k].pct < lowestAlert.pct) {
-          lowestAlert = root.activeAlerts[k]
+      for (var m = 1; m < root.activeAlerts.length; m++) {
+        if (root.activeAlerts[m].pct < lowestAlert.pct) {
+          lowestAlert = root.activeAlerts[m]
         }
       }
       var qKey = lowestAlert.id + "_" + root.alertThresholdPct
@@ -317,7 +363,7 @@ Panel {
           if (parsed && parsed.status === "ok") {
             root.usageData = parsed
             root.dataVersion++
-            root.checkAndNotify()
+            root.seedHistoricalAlerts()
           }
         }
       }
@@ -700,15 +746,20 @@ Panel {
               Item { Layout.fillWidth: true }
             }
 
-            // 503 Capacity Warning if detected
+            // Capacity Warning if detected recently (<= 5 mins)
             Repeater {
               model: {
                 var lat = root.usageData ? root.usageData.latency : null
                 if (!lat || !lat.recent_errors) return []
+                var nowSec = Date.now() / 1000
                 var caps = []
                 for (var i = 0; i < lat.recent_errors.length; i++) {
-                  if (lat.recent_errors[i].is_capacity_error) {
-                    caps.push(lat.recent_errors[i])
+                  var e = lat.recent_errors[i]
+                  if (e.is_capacity_error) {
+                    var isFresh = e.is_recent !== undefined ? e.is_recent : (e.timestamp && (nowSec - e.timestamp) <= 300)
+                    if (isFresh) {
+                      caps.push(e)
+                    }
                   }
                 }
                 return caps.slice(-1)

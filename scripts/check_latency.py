@@ -135,8 +135,18 @@ def get_latency_report(log_dir: Path = DEFAULT_LOG_DIR, host: str = DEFAULT_HOST
     recent_turns = turns[-5:]
     avg_turn = round(sum(t["duration_sec"] for t in recent_turns) / len(recent_turns), 1) if recent_turns else None
 
-    # Determine health state
-    has_capacity_issues = any(e.get("is_capacity_error") for e in errors[-5:])
+    now_ts = int(datetime.now().timestamp())
+
+    # Mark freshness of errors (active if within the last 5 minutes / 300s)
+    recent_errors_list = []
+    for err in errors[-5:]:
+        err_copy = dict(err)
+        err_ts = err_copy.get("timestamp", 0)
+        err_copy["is_recent"] = bool(err_ts and (now_ts - err_ts <= 300))
+        recent_errors_list.append(err_copy)
+
+    # Determine health state (only active/recent capacity errors cause degraded health)
+    has_capacity_issues = any(e.get("is_capacity_error") and e.get("is_recent") for e in recent_errors_list)
     if has_capacity_issues or (avg_turn is not None and avg_turn > 15):
         health = "degraded"
     elif avg_turn is not None and avg_turn > 8:
@@ -146,7 +156,7 @@ def get_latency_report(log_dir: Path = DEFAULT_LOG_DIR, host: str = DEFAULT_HOST
 
     return {
         "status": "ok",
-        "timestamp": int(datetime.now().timestamp()),
+        "timestamp": now_ts,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "host": host,
         "log_file": str(latest_log) if latest_log else None,
@@ -157,7 +167,7 @@ def get_latency_report(log_dir: Path = DEFAULT_LOG_DIR, host: str = DEFAULT_HOST
         },
         "average_turn_sec": avg_turn,
         "recent_turns": recent_turns,
-        "recent_errors": errors[-5:],
+        "recent_errors": recent_errors_list,
     }
 
 
